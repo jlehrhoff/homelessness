@@ -1,0 +1,342 @@
+---
+title: "Homelessness in America"
+author: "Jake Lehrhoff"
+date: "October 4, 2015"
+output: html_document
+---
+
+### Background
+
+Our world is filled with that which we choose to not see, from the rat population in New York to iTunes user agreements, all for the benefit of streamlining our own existence. A far less insubstantial marginalized aspect of society is the **homeless**, a population comprised of the young and old, parents and children, veterans, the mentally ill, and the unlucky.
+
+Startlingly, estimates of mental illness in the homeless population are [as high as 33%](http://www.treatmentadvocacycenter.org), the vast majority of which are untreated.
+
+### Research Goals
+
+* Investigate state homeless populations
+* Analyze the link between temperature and homeless populations
+* Probe the relationship between mental health spending and homeless populations
+
+### Data
+
+* 2009 Annual Homeless Assessment Report (AHAR) to Congress
+* 2013 Annual Homeless Assessment Report (AHAR) to Congress
+* National Alliance on Mental Health -- State Mental Health Cuts: The Continuing Crisis
+* Average winter temperature by state
+
+
+### Setup and Cleaning Homeless and Mental Health Data
+
+This data came from pdf files (AHAR and NAMH) and tables embedded in websites (weather data). Therefore, cleaning was a major component of this project. Tabula, a program for extracting data from pdf files, was an effective method for retrieving the homeless and mental health data; however, the resulting csv files required extensive cleaning. Extra spaces, commas, and percentage symbols had to be removed before tables could be manipulated or joined. For simplicity, a new table was created with just the variables of interest.
+
+```{r global_options, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+setwd("/Users/jacoblehrhoff/desktop/nycdsa/bootcamp003_student/Project1-ExploreVis/Jake/data/")
+
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(RColorBrewer)
+library(grid)
+library(XML)
+
+# function for cleaning symbols out of numbers in data
+as.numeric.func <- function(x, y) {
+  as.numeric(gsub(y,"", x))
+}
+
+homeless2009 <- read.csv("2009_homeless_estimates.csv", header = TRUE, stringsAsFactors = FALSE)
+
+# Remove %
+homeless2009$Homeless.Rate <- as.numeric.func(homeless2009$Homeless.Rate, "%")
+
+# Remove commas, change names, create unsheltered rate, select relevant columns
+homeless2009a <- data.frame(homeless2009, lapply(homeless2009[2:5], as.numeric.func, y = ",")) %>%
+  mutate(., Homeless2009 = Homeless.Population.1, Sheltered2009 = Sheltered.Population, 
+         Unsheltered2009 = Unsheltered.Population.1, StatePop2009 = State.Population.1, 
+         HomelessRate2009 = Homeless.Rate, UnshelteredRate2009 = (Unsheltered2009 / Homeless2009) * 100,
+         State = as.character(State)) %>%
+  select(., State, Homeless2009, HomelessRate2009, UnshelteredRate2009, StatePop2009)
+
+# Remove spaces after state names
+homeless2009a$State <- substr(homeless2009a$State, 1, nchar(homeless2009a$State) - 1)
+
+homeless2013 <- read.csv("2013_Homeless.csv", header = TRUE, stringsAsFactors = FALSE)
+
+# remove commas and %
+homeless2013$Homeless2013 <- as.numeric.func(homeless2013$Total.Homeless.Persons, ",")
+homeless2013$Unsheltered.persons....Homeless.population. <- 
+  as.numeric.func(homeless2013$Unsheltered.persons....Homeless.population., "%")
+
+# Rename and select columns
+homeless2013a <- mutate(homeless2013, HomelessRate2013 = (Homeless2013/Population)*100, 
+                        UnshelteredRate2013 = Unsheltered.persons....Homeless.population.,
+                        State = as.character(State), StatePop2013 = Population) %>%
+  select(., State, Homeless2013, HomelessRate2013, UnshelteredRate2013, StatePop2013)
+
+# join homeless data
+data <- inner_join(homeless2009a, homeless2013a, by = "State")
+
+state_MH_budget <- read.csv("State_Mental_Health_Budget.csv", header = TRUE,
+                            stringsAsFactors = FALSE, fileEncoding = "latin1")
+
+# Change column names
+state_MH_budget <- mutate(state_MH_budget, Budget2009 = FY2009..Millions., Budget2012 = FY2012..Millions.,
+                          BudgetPercentChange = Percent.Change) %>%
+  select(., State, Budget2009, Budget2012, BudgetPercentChange)
+
+state_MH_budget$BudgetPercentChange <- as.numeric.func(state_MH_budget$BudgetPercentChange, "%")
+
+# Manipulating budget data and joining
+data <- inner_join(data, state_MH_budget, by = "State")
+data <- mutate(data, BudgetRank = as.integer(rank(desc(BudgetPercentChange))),
+               HomelessChangeRank = as.integer(rank(HomelessRate2013-HomelessRate2009)),
+               RankDiff = as.integer(rank(HomelessChangeRank - BudgetRank)), 
+               extreme = ifelse(RankDiff > 47, 1, ifelse(RankDiff < 4, -1, 0)))
+```
+
+### Weather and Map Data
+
+The weather data came in a list of two tables, so it had to be split and then combined into a single data frame. Additionally, A new variable was created, Wtemp, cutting the data into three parts, "cold," "moderate," and "hot." Finally, the data could be merged with map data for the upcoming visualizations.
+
+```{r}
+
+urlWin <- "http://www.currentresults.com/Weather/US/average-state-temperatures-in-winter.php"
+winterTemp <- readHTMLTable(urlWin, header = TRUE, stringsAsFactors = FALSE)
+
+# Change names
+winterTemp$`Average temperature for each state during winter.`$AvgW <- 
+  as.numeric(winterTemp$`Average temperature for each state during winter.`$`Avg Â° F`)
+winterTemp$`NULL`$AvgW <- as.numeric(winterTemp$`NULL`$`Avg Â° F`)
+
+# Separate winter tables
+winterTemp1a <- select(winterTemp$`Average temperature for each state during winter.`, State, AvgW)
+winterTemp1b <- select(winterTemp$`NULL`, State, AvgW)
+
+# Merge winter tables
+winterTemp2 <- merge(x = winterTemp1a, y = winterTemp1b, all = TRUE)
+
+# Merge weather with homeless and budget data
+data <- merge(x = data, y = winterTemp2)
+
+# Deciding on logical breaks for temperature factor
+labels <- c("cold", "moderate", "warm")
+minW <- min(data$AvgW)
+maxW <- max(data$AvgW)
+RangeW <- (maxW-minW)
+breaksW <- c(minW, minW + RangeW/3, minW + 2 * RangeW/3, maxW)
+
+# Adding columns with temperature groups
+data$Wtemp <- cut(data$AvgW, breaks = breaksW, include.lowest = TRUE)
+
+all_states <- map_data("state")
+all_states <- filter(all_states, region!= "district of columbia")
+data$region <- tolower(data$State)
+Total <- merge(all_states, data, by="region")
+```
+
+### Homeless Population by State
+
+To begin the investigation, I looked at the homeless population by state with a choropleth map. California stands out, as it's homeless population is more than twice that of the next most populous state.
+
+```{r, echo=FALSE}
+# Map of homeless population by state
+
+map1 <- ggplot() +
+  geom_polygon(data=Total, aes(x=long, y=lat, group=group, 
+                               fill = Total$Homeless2009), colour="grey75") +
+  coord_map("polyconic") +
+  scale_fill_continuous(low = "white", high = "brown3", guide = "colorbar",
+                        breaks = c(min(Total$Homeless2009), (max(Total$Homeless2009)))) +
+  theme_bw() + 
+  labs(fill = "Homeless Population", title = "Homeless Population by State, 2009", x = "", y = "") +
+  theme(panel.grid = element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        title=element_text(size=14),
+        legend.text = element_text(size=10),
+        legend.position = "bottom")
+map1
+```
+
+The distribution of homeless populations among "cold," "moderate," and "warm" climates is given below. Unsurprisingly, homeless populations are larger in warm climate states, and New York and California stand out with the highest homeless populations.
+
+```{r echo = FALSE}
+# Boxplot of homeless population and winter temperature
+bp1 <- ggplot(data, aes(Wtemp, Homeless2009, fill = Wtemp)) +
+  theme_hc() +
+  geom_boxplot(outlier.colour = NA, width = .75) +
+  scale_y_continuous(limits = c(0, 150000)) +
+  geom_text(aes(label=ifelse((Homeless2009>5*IQR(Homeless2009)),State,""))) +
+  scale_fill_manual(values = c("skyblue3", "lightgoldenrod1","indianred1"), 
+                    name="", 
+                    labels = c("< 24ºF", "24-46ºF", ">46ºF")) +
+  xlab("Average Winter Temperature") +
+  ylab("2009 Homeless Population by State") +
+  ggtitle("State Homeless Population by Winter Temperature, 2009") +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size=10),
+        axis.ticks = element_blank(),
+        axis.title=element_text(size=12),
+        title=element_text(size=14),
+        legend.text = element_text(size=10))
+bp1 
+```
+
+However, more interesting than the homeless population is the homelessness rate. Here, New York is no longer an outlier among cold climate states. 
+
+``` {r echo = FALSE}
+# Boxplot of Homeless Rates
+bp2 <- ggplot(data, aes(Wtemp, HomelessRate2009, fill = Wtemp)) +
+  geom_boxplot(outlier.colour = NA, width = .75) +
+  scale_fill_manual(values = c("skyblue3", "lightgoldenrod1","indianred1"),
+                  name = "",
+                  labels = c("< 24ºF", "24-46ºF", ">46ºF")) +
+  xlab("Average Winter Temperature") +
+  ylab("2009 Homeless Rate by State (%)") +
+  ggtitle("State Homeless Rate by Winter Temperature, 2009") +
+  theme_hc() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size=10),
+        axis.ticks = element_blank(),
+        axis.title=element_text(size=13),
+        title=element_text(size=14),
+        legend.text = element_text(size=10))
+bp2
+```
+
+As seen in the density plot, New York stands with Alaska with a slightly higher homelessness rate than other cold climate states, skewing the distribution to the right. Interestingly, the distribution of homelessness among warm weather states is quite broad, with a similar peak as the other climates.
+
+```{r echo = FALSE}
+# Density plot of homeless rates
+l1 <- ggplot(data, aes(HomelessRate2009, color = Wtemp)) + 
+  geom_line(stat = "density", size = 2) +
+  scale_color_manual(values = c("skyblue3", "lightgoldenrod1","indianred1"), 
+                     name="", 
+                     labels = c("< 24ºF", "24-46ºF", ">46ºF")) +
+  scale_x_continuous(limits = c(0, 0.6)) +
+  xlab("State Homeless Rate (%)") +
+  ylab("Density") +
+  ggtitle("Density of State Homeless Rate by Winter Temperature, 2009") +
+  annotate("text", x = .42, y = 2.85, label = "Alaska", size = 4, color = "skyblue3", face = "bold") +
+  annotate("text", x = .42, y = 3.3, label = "New York", size = 4, color = "skyblue3", face = "bold") +
+  geom_segment(aes(x = .39, y = 2.9, xend = .31, yend = 2.2), arrow = arrow(length = unit(0.3, "cm")),
+               color = "skyblue3") +
+  theme_hc() +
+  theme(legend.position = "bottom", 
+        axis.text=element_text(size=9),
+        axis.title=element_text(size=13),
+        title=element_text(size=14),
+        legend.text = element_text(size=10))
+l1  
+```
+
+### Changes in Homeless Rates
+
+There are reasons to expect homeless rates to drop from 2009 to 2013: the country had time to recover from "The Great Recession" and unemployment dropped significantly. Many states see minor improvements in homeless rates, Nevada in particular. North Dakota, New York, Wyoming, and Montana show the opposite trend, with homeless rates rising .1-.2 percentage points.
+
+``` {r echo = FALSE}
+# Change in homelessness rates
+map4 <- ggplot() +
+  geom_polygon(data=Total, aes(x=long, y=lat, group=group, 
+                               fill = HomelessRate2013-HomelessRate2009), colour="grey 75") +
+  scale_fill_gradient2(low = "palegreen4", high = "firebrick4", mid = "grey99", guide = "colorbar") +
+  coord_map("polyconic") +
+  theme_bw() + labs(fill = "Homelessness Rate Change", title = "Change in Homelessness Rate, 2009-2013",
+                    x = "", y = "") +
+  theme(panel.grid = element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        title=element_text(size=14),
+        legend.text = element_text(size=10),
+        legend.position = "bottom")
+map4
+```
+
+### Unsheltered Homeless
+
+The unsheltered homeless population is the number of people sleeping on the streets on a given night, and is, at best, an estimate. However, some states saw significant shifts in the percentage of the homeless population that went unsheltered, with North Dakota's unsheltered rate rising a troubling 60 percentage points. This aligns with [reports](http://www.washingtontimes.com/news/2015/feb/23/homelessness-goes-up-as-people-pour-into-north-dak/?page=all) of surging rent in light of bubbling populations, as people flood into North Dakota looking to work in the growing oil industry. Conversely, Louisiana's unsheltered population dropped by over 20 percentage points, as more years separated the healing city from the devestation of [Hurricane Katrina](http://www.nola.com/politics/index.ssf/2013/03/number_of_homeless_drops_79_pe.html).
+
+``` {r echo = FALSE}
+map6 <- ggplot() +
+  geom_polygon(data=Total, aes(x=long, y=lat, group=group, 
+                               fill = UnshelteredRate2013-UnshelteredRate2009), colour="grey 75") +
+  scale_fill_gradient2(low = "palegreen4", high = "firebrick4", mid = "grey99", guide = "colorbar") +
+  coord_map("polyconic") +
+  theme_bw() + labs(fill = "Percent Change", 
+                    title = "Change in Unsheltered Rates, 2009-2012",
+                    x = "", y = "") +
+  theme(panel.grid = element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        title=element_text(size=14),
+        legend.text = element_text(size=10),
+        legend.position = "bottom")
+map6
+```
+
+### State Mental Health Budgets
+
+Given the prevalence of mental illness in the homeless population, homeless rates were plotted against mental health spending, with linear regression lines included for reference.
+
+``` {r echo = FALSE}
+p1 <- ggplot(data, aes(Budget2012/StatePop2013*1e6, HomelessRate2013)) + 
+  geom_point(size = 5) +
+  geom_point(aes(col = Wtemp), size = 4) +
+  scale_color_manual(values = c("skyblue3", "lightgoldenrod1","indianred1"),
+                     name="", 
+                     labels = c("< 24ºF", "24-46ºF", ">46ºF")) +
+  theme_hc() + 
+  ylab("Homeless Rate (%)") + 
+  xlab("Per Capita Mental Health Budget ($)") +
+  ggtitle("Homeless Rate by Per Capita State Mental Health Budget, 2013") +
+  geom_text(aes(label=ifelse(HomelessRate2013>.4 | Budget2012/StatePop2013*1e6 > 150, State,""), 
+                vjust = 1.75), size = 4) +
+  geom_text(aes(label=ifelse(HomelessRate2013>.3 & Budget2012/StatePop2013*1e6 < 80, State,""), 
+                hjust = 1.15), size = 4) +
+  geom_text(aes(label=ifelse(HomelessRate2013>.35 & HomelessRate2013<.356, State,""), 
+                vjust = 1.75), size = 4) +
+  geom_smooth(method=lm, se=FALSE, aes(color = Wtemp)) +
+  theme(legend.position = "bottom", 
+        axis.text=element_text(size=9),
+        axis.title=element_text(size=13),
+        title=element_text(size=14),
+        legend.text = element_text(size=10))
+p1
+```
+
+Changes in mental health spending and homeless rates from 2009 to 2013 show modest changes in homeless rates. Despite huge increases in menthal health spending, North Dakota's homeless rates continue to rise. Nevada, on the other hand, but decreased it's spending and saw a reduction in homeless rates. However, more current data show that [that trend didn't last](http://www.helphopehome.org/2014-FINAL-HOMELESS-CENSUS.pdf). Louisiana also saw a decrease in homeless rates with virtually no budgetary change.
+
+``` {r echo = FALSE}
+p3 <- ggplot(data, aes(BudgetPercentChange, HomelessRate2013-HomelessRate2009)) + 
+  geom_point(size = 5) +
+  geom_point(aes(col = Wtemp), size = 4) +
+  scale_color_manual(values = c("skyblue3", "lightgoldenrod1","indianred1"),
+                     name="", 
+                     labels = c("< 24ºF", "24-46ºF", ">46ºF")) +
+  theme_hc() + 
+  ylab("Homeless Rate Change (percentage points)") + 
+  xlab("Mental Health Budget Change (percentage points)") +
+  ggtitle("State Homeless Rate Change by MH Budget Change, 2009-2013") +
+  geom_text(aes(label=ifelse(HomelessRate2013-HomelessRate2009 >.1 | 
+                               HomelessRate2013-HomelessRate2009 < -.15, State,""), 
+                hjust = 1.15), size = 5) +
+  theme(legend.position = "bottom", 
+        axis.text=element_text(size=9),
+        axis.title=element_text(size=12),
+        title=element_text(size=13),
+        legend.text = element_text(size=10))
+p3
+```
+
+### Conclusions
+
+Beyond the expected relationship between temperature and homeless rates, this investigation uncovered some interesting relationships between state mental health budgets and homeless rates. For one, North Dakota's significant increase in mental health budget may be better understood in light of the increase in homeless rates, and in particular, unsheltered homeless rates. Nevada's decrease in mental health spending, possibly in light of it's decreasing homeless populations, may have set the scene for the subsequent increase in homelessness in the years following this data. Finally, the decrease in homelessness in Louisiana is due to improvements in other welfare supports beyond mental health care.
+
+For more on mental illness and homelessness, these worthy organizations have lots of great information and prominently placed donate buttons, if you feel so inclined.
+
+[National Coalition for the Homeless](http://www.nationalhomeless.org/factsheets/Mental_Illness.html)
+
+[National Alliance to End Homelessness](http://www.endhomelessness.org/pages/mental_physical_health)
